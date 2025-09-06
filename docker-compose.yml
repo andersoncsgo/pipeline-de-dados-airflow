@@ -1,0 +1,139 @@
+version: '3.8'
+
+services:
+  
+  db:
+    image: postgres:16
+    container_name: banvic_source_db
+    environment:
+      - POSTGRES_DB=banvic
+      - POSTGRES_USER=data_engineer
+      - POSTGRES_PASSWORD=v3rysecur&pas5w0rd
+    volumes:
+      - ./banvic.sql:/docker-entrypoint-initdb.d/banvic.sql
+      - source_db_data:/var/lib/postgresql/data
+    ports:
+      - "55432:5432"
+    networks:
+      - banvic_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U data_engineer -d banvic"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  
+  postgres_dw:
+    image: postgres:16
+    container_name: banvic_dw
+    environment:
+      - POSTGRES_DB=banvic_dw
+      - POSTGRES_USER=dw_user
+      - POSTGRES_PASSWORD=dw_password
+    volumes:
+      - ./scripts/create_dw_tables.sql:/docker-entrypoint-initdb.d/create_dw_tables.sql
+      - dw_data:/var/lib/postgresql/data
+    ports:
+      - "55433:5432"
+    networks:
+      - banvic_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dw_user -d banvic_dw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+ 
+  postgres_airflow:
+    image: postgres:16
+    container_name: airflow_metadata_db
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    networks:
+      - banvic_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  airflow-init: 
+    image: apache/airflow:2.9.2
+    container_name: airflow_init
+    depends_on:
+      postgres_airflow:
+        condition: service_healthy
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./data:/opt/airflow/data
+      - ./output:/opt/airflow/output
+    networks:
+      - banvic_network
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_airflow/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=itsasecretkey
+    entrypoint: /bin/bash
+    command: -c "airflow db init && airflow users create --role Admin --username airflow --password airflow --firstname Admin --lastname User --email admin@example.com"
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.2
+    container_name: airflow_scheduler
+    depends_on:
+      postgres_airflow:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      postgres_dw:
+        condition: service_healthy
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./data:/opt/airflow/data
+      - ./output:/opt/airflow/output
+    networks:
+      - banvic_network
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_airflow/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=itsasecretkey
+      # Conexões do Airflow
+      - AIRFLOW_CONN_POSTGRES_SOURCE=postgres://data_engineer:v3rysecur&pas5w0rd@db:5432/banvic # <-- CORRIGIDO para usar o host "db"
+      - AIRFLOW_CONN_POSTGRES_DW=postgres://dw_user:dw_password@postgres_dw:5432/banvic_dw
+    command: scheduler
+
+  airflow-webserver:
+    image: apache/airflow:2.9.2
+    container_name: airflow_webserver
+    depends_on:
+      - airflow-scheduler
+    ports:
+      - "8080:8080"
+    networks:
+      - banvic_network
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_airflow/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=itsasecretkey
+    command: webserver
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  source_db_data:
+  dw_data:
+  airflow_db_data:
+
+networks:
+  banvic_network:
+    driver: bridge
